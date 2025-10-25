@@ -78,6 +78,9 @@ class CfnApiProvider(CfnBaseApiProvider):
 
         for stack in stacks:
             resources = stack.resources
+            # Count ApiGatewayV2 resources
+            v2_count = sum(1 for r in resources.values() if r.get(CfnBaseApiProvider.RESOURCE_TYPE, "").startswith("AWS::ApiGatewayV2::"))
+            LOG.info("Processing stack with %d total resources, %d ApiGatewayV2 resources", len(resources), v2_count)
             for logical_id, resource in resources.items():
                 resource_type = resource.get(CfnBaseApiProvider.RESOURCE_TYPE)
                 if resource_type == AWS_APIGATEWAY_RESTAPI:
@@ -426,6 +429,11 @@ class CfnApiProvider(CfnBaseApiProvider):
                     stack_path=stack_path,
                 )
                 collector.add_routes(logical_id, [routes])
+            elif protocol_type == CfnApiProvider.WEBSOCKET_PROTOCOL_TYPE:
+                # WebSocket API without body - routes will be added separately via AWS::ApiGatewayV2::Route
+                # Just register the API so routes can be attached later
+                LOG.info("Registered WebSocket API: %s", logical_id)
+                collector.add_routes(logical_id, [])
             return
 
         CfnBaseApiProvider.extract_swagger_route(
@@ -480,8 +488,12 @@ class CfnApiProvider(CfnBaseApiProvider):
         integration_target = properties.get("Target")
         operation_name = properties.get("OperationName")
 
+        LOG.info("Processing route '%s': api_id=%s, route_key=%s, integration_target=%s",
+                 logical_id, api_id, route_key, integration_target)
+
         if integration_target:
             function_name, payload_format_version = self._get_route_function_name(resources, integration_target)
+            LOG.info("Extracted function_name=%s from integration", function_name)
         else:
             LOG.debug(
                 "Skipping The AWS::ApiGatewayV2::Route '%s', as it does not contain an integration for a Lambda "
@@ -492,7 +504,9 @@ class CfnApiProvider(CfnBaseApiProvider):
 
         # Check if this is a WebSocket API
         api_resource = self._get_api_resource(resources, api_id)
-        is_websocket = self._is_websocket_api(api_resource)
+        is_websocket = self._is_websocket_api(api_resource)I
+
+        LOG.info("Route '%s': api_id=%s, route_key=%s, is_websocket=%s", logical_id, api_id, route_key, is_websocket)
 
         if is_websocket:
             # WebSocket route - route_key is the actual route key ($connect, $disconnect, etc.)

@@ -4,10 +4,14 @@ Connects the CLI with Local API Gateway service.
 
 import logging
 import os
+import time
 
 from samcli.commands.local.lib.exceptions import NoApisDefined
 from samcli.lib.providers.api_provider import ApiProvider
 from samcli.local.apigw.local_apigw_service import LocalApigwService
+from samcli.local.apigw.local_websocket_service import LocalWebSocketService
+from samcli.local.apigw.management_api_service import ManagementApiService
+from samcli.local.apigw.websocket_connection_manager import WebSocketConnectionManager
 
 LOG = logging.getLogger(__name__)
 
@@ -57,26 +61,87 @@ class LocalApiService:
         if not self.api_provider.api.routes:
             raise NoApisDefined("No APIs available in template")
 
+        LOG.info("Total routes found: %d", len(self.api_provider.api.routes))
+        for route in self.api_provider.api.routes:
+            LOG.info("Route: path=%s, function=%s, event_type=%s", route.path, route.function_name, route.event_type)
+
+        # Separate routes by type
+        http_routes = [route for route in self.api_provider.api.routes if not route.is_websocket()]
+        websocket_routes = [route for route in self.api_provider.api.routes if route.is_websocket()]
+
+        LOG.info("HTTP routes: %d, WebSocket routes: %d", len(http_routes), len(websocket_routes))
+
         static_dir_path = self._make_static_dir_path(self.cwd, self.static_dir)
 
-        # We care about passing only stderr to the Service and not stdout because stdout from Docker container
-        # contains the response to the API which is sent out as HTTP response. Only stderr needs to be printed
-        # to the console or a log file. stderr from Docker container contains runtime logs and output of print
-        # statements from the Lambda function
-        service = LocalApigwService(
-            api=self.api_provider.api,
-            lambda_runner=self.lambda_runner,
-            static_dir=static_dir_path,
-            port=self.port,
-            host=self.host,
-            ssl_context=self.ssl_context,
-            stderr=self.stderr_stream,
-        )
+        # Start WebSocket services if WebSocket routes exist
+        websocket_service = None
+        management_api_service = None
+        if websocket_routes:
+            websocket_port = self.port + 1  # WebSocket on port+1
+            management_api_port = self.port + 2  # Management API on port+2
+            connection_manager = WebSocketConnectionManager()
 
-        service.create()
+            # Create WebSocket service
+            # Build Management API endpoint URL for Lambda functions to use
+            management_api_endpoint = f"http://{self.host}:{management_api_port}"
 
-        # Print out the list of routes that will be mounted
-        self._print_routes(self.api_provider.api.routes, self.host, self.port, bool(self.ssl_context))
+            websocket_service = LocalWebSocketService(
+                routes=websocket_routes,
+                lambda_runner=self.lambda_runner,
+                connection_manager=connection_manager,
+                port=websocket_port,
+                host=self.host,
+                route_selection_expression="$request.body.action",  # Default expression
+                stderr=self.stderr_stream,
+                management_api_endpoint=management_api_endpoint,
+            )
+
+            # Create Management API service on separate port
+            management_api_service = ManagementApiService(
+                connection_manager=connection_manager,
+                port=management_api_port,
+                host=self.host,
+            )
+
+            # Start both services in background threads
+            websocket_service.start_in_thread()
+            # Give WebSocket server time to start
+            time.sleep(0.5)
+            management_api_service.start_in_thread()
+
+            LOG.info("Started WebSocket server on ws://%s:%d", self.host, websocket_port)
+            LOG.info("Started Management API on http://%s:%d/@connections/{{connectionId}}", self.host, management_api_port)
+
+        # Start HTTP/REST API service if HTTP routes exist
+        if http_routes:
+            # We care about passing only stderr to the Service and not stdout because stdout from Docker container
+            # contains the response to the API which is sent out as HTTP response. Only stderr needs to be printed
+            # to the console or a log file. stderr from Docker container contains runtime logs and output of print
+            # statements from the Lambda function
+
+            # Create a filtered API object with only HTTP routes
+            from samcli.lib.providers.provider import Api
+            http_api = Api(routes=http_routes)
+
+            service = LocalApigwService(
+                api=http_api,
+                lambda_runner=self.lambda_runner,
+                static_dir=static_dir_path,
+                port=self.port,
+                host=self.host,
+                ssl_context=self.ssl_context,
+                stderr=self.stderr_stream,
+            )
+
+            service.create()
+
+            # Print out the list of routes that will be mounted
+            self._print_routes(http_routes, self.host, self.port, bool(self.ssl_context))
+
+        # Print WebSocket routes
+        if websocket_routes:
+            self._print_websocket_routes(websocket_routes, self.host, websocket_port, management_api_port)
+
         LOG.info(
             "You can now browse to the above endpoints to invoke your functions. "
             "You do not need to restart/reload SAM CLI while working on your functions, "
@@ -85,7 +150,16 @@ class LocalApiService:
             "to be picked up. You only need to restart SAM CLI if you update your AWS SAM template"
         )
 
-        service.run()
+        # Start HTTP service (blocks)
+        if http_routes:
+            service.run()
+        elif websocket_routes:
+            # If only WebSocket routes, keep main thread alive
+            try:
+                import signal
+                signal.pause()  # Keep process alive
+            except KeyboardInterrupt:
+                LOG.info("Shutting down...")
 
     @staticmethod
     def _print_routes(routes, host, port, ssl_enabled=False):
@@ -120,6 +194,44 @@ class LocalApiService:
             print_lines.append(output)
 
             LOG.info(output)
+
+        return print_lines
+
+    @staticmethod
+    def _print_websocket_routes(routes, host, websocket_port, management_api_port):
+        """
+        Helper method to print WebSocket routes.
+
+        Parameters
+        ----------
+        routes : list of Route
+            WebSocket routes
+        host : str
+            Host name
+        websocket_port : int
+            WebSocket server port number
+        management_api_port : int
+            Management API port number
+
+        Returns
+        -------
+        list of str
+            List of lines printed
+        """
+        print_lines = []
+        LOG.info("\nWebSocket Routes:")
+        for route in routes:
+            output = "  {} -> {}".format(route.route_key, route.function_name)
+            print_lines.append(output)
+            LOG.info(output)
+
+        output = "\nWebSocket Endpoint: ws://{}:{}".format(host, websocket_port)
+        print_lines.append(output)
+        LOG.info(output)
+
+        output = "Management API: http://{}:{}/@connections/{{connectionId}}".format(host, management_api_port)
+        print_lines.append(output)
+        LOG.info(output)
 
         return print_lines
 

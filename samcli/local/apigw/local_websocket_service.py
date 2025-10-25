@@ -4,13 +4,16 @@ Local WebSocket API Gateway service for SAM CLI
 import asyncio
 import json
 import logging
+from io import StringIO
 from threading import Thread
 from typing import Dict, List, Optional
 
 import websockets
 from websockets.server import WebSocketServerProtocol
 
+from samcli.lib.utils.stream_writer import StreamWriter
 from samcli.local.apigw.route import Route
+from samcli.local.services.base_local_service import LambdaOutputParser
 from samcli.local.apigw.websocket_connection_manager import WebSocketConnectionManager
 from samcli.local.apigw.websocket_event_constructor import (
     construct_websocket_event,
@@ -38,6 +41,8 @@ class LocalWebSocketService:
         port: int = 3001,
         host: str = "127.0.0.1",
         route_selection_expression: str = "$request.body.action",
+        stderr=None,
+        management_api_endpoint: Optional[str] = None,
     ):
         """
         Initialize WebSocket service.
@@ -56,6 +61,10 @@ class LocalWebSocketService:
             Host to bind to
         route_selection_expression : str
             Expression to extract route from message
+        stderr : StreamWriter, optional
+            Stream writer for Lambda stderr output
+        management_api_endpoint : str, optional
+            Management API endpoint URL (for Lambda functions to use)
         """
         self.routes = self._build_route_map(routes)
         self.lambda_runner = lambda_runner
@@ -63,6 +72,8 @@ class LocalWebSocketService:
         self.port = port
         self.host = host
         self.route_selection_expression = route_selection_expression
+        self.stderr = stderr
+        self.management_api_endpoint = management_api_endpoint
         self.server = None
 
     def _build_route_map(self, routes: List[Route]) -> Dict[str, Route]:
@@ -214,6 +225,7 @@ class LocalWebSocketService:
             route_key=route_key,
             body=body,
             event_type=event_type,
+            management_api_endpoint=self.management_api_endpoint,
         )
 
         # Invoke Lambda in thread pool to avoid blocking asyncio
@@ -256,13 +268,15 @@ class LocalWebSocketService:
         """
         try:
             LOG.info("Invoking %s", function_name)
-            response, _, _ = self.lambda_runner.invoke(
-                function_name=function_name,
-                event=json.dumps(event),
-                stdout=None,
-                stderr=None,
-            )
-            return response.decode("utf-8") if response else None
+            # Capture stdout to get Lambda response (same pattern as HTTP API service)
+            with StringIO() as stdout:
+                event_str = json.dumps(event, sort_keys=True)
+                stdout_writer = StreamWriter(stdout, auto_flush=True)
+
+                self.lambda_runner.invoke(function_name, event_str, stdout=stdout_writer, stderr=self.stderr)
+                lambda_response, _ = LambdaOutputParser.get_lambda_output(stdout)
+
+            return lambda_response
         except Exception as e:
             LOG.error("Lambda invocation error for %s: %s", function_name, e)
             return None

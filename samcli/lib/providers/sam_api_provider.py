@@ -6,10 +6,19 @@ from typing import Dict, List, Optional, Tuple, Union, cast
 from samcli.commands.local.lib.swagger.integration_uri import LambdaUri
 from samcli.commands.validate.lib.exceptions import InvalidSamDocumentException
 from samcli.lib.providers.api_collector import ApiCollector
+from samcli.lib.providers.cfn_api_provider import CfnApiProvider
 from samcli.lib.providers.cfn_base_api_provider import CfnBaseApiProvider
 from samcli.lib.providers.provider import Stack
 from samcli.lib.utils.colors import Colored
-from samcli.lib.utils.resources import AWS_SERVERLESS_API, AWS_SERVERLESS_FUNCTION, AWS_SERVERLESS_HTTPAPI
+from samcli.lib.utils.resources import (
+    AWS_APIGATEWAY_V2_API,
+    AWS_APIGATEWAY_V2_AUTHORIZER,
+    AWS_APIGATEWAY_V2_ROUTE,
+    AWS_APIGATEWAY_V2_STAGE,
+    AWS_SERVERLESS_API,
+    AWS_SERVERLESS_FUNCTION,
+    AWS_SERVERLESS_HTTPAPI,
+)
 from samcli.local.apigw.authorizers.authorizer import Authorizer
 from samcli.local.apigw.authorizers.lambda_authorizer import LambdaAuthorizer
 from samcli.local.apigw.route import Route
@@ -71,8 +80,13 @@ class SamApiProvider(CfnBaseApiProvider):
         # the template we are creating the implicit apis due to plugins that translate it in the SAM repo,
         # which we later merge with the explicit ones in SamApiProvider.merge_apis. This requires the code to be
         # parsed here and in InvokeContext.
+
+        # Create a CfnApiProvider instance to handle raw CloudFormation resources
+        cfn_provider = CfnApiProvider()
+
         for stack in stacks:
-            for logical_id, resource in stack.resources.items():
+            resources = stack.resources
+            for logical_id, resource in resources.items():
                 resource_type = resource.get(CfnBaseApiProvider.RESOURCE_TYPE)
                 if resource_type == AWS_SERVERLESS_FUNCTION:
                     self._extract_routes_from_function(
@@ -96,6 +110,33 @@ class SamApiProvider(CfnBaseApiProvider):
                         cwd=cwd,
                         disable_authorizer=disable_authorizer,
                     )
+
+                # Process raw CloudFormation API Gateway V2 resources (for WebSocket APIs)
+                if resource_type == AWS_APIGATEWAY_V2_API:
+                    cfn_provider._extract_cfn_gateway_v2_api(
+                        stack.stack_path,
+                        logical_id,
+                        resource,
+                        collector,
+                        cwd=cwd,
+                        disable_authorizer=disable_authorizer,
+                    )
+
+                if resource_type == AWS_APIGATEWAY_V2_ROUTE:
+                    cfn_provider._extract_cfn_gateway_v2_route(
+                        stack.stack_path,
+                        resources,
+                        logical_id,
+                        resource,
+                        collector,
+                        disable_authorizer=disable_authorizer,
+                    )
+
+                if resource_type == AWS_APIGATEWAY_V2_STAGE:
+                    cfn_provider._extract_cfn_gateway_v2_stage(resources, resource, collector)
+
+                if resource_type == AWS_APIGATEWAY_V2_AUTHORIZER and not disable_authorizer:
+                    cfn_provider._extract_cfn_gateway_v2_authorizer(logical_id, resource, collector)
 
         collector.routes = self.merge_routes(collector)
 
@@ -594,14 +635,19 @@ class SamApiProvider(CfnBaseApiProvider):
         )
 
         for config in all_configs:
-            # Normalize the methods before de-duping to allow an ANY method in implicit API to override a regular HTTP
-            # method on explicit route.
-            for normalized_method in config.methods:
-                key = config.path + normalized_method
-                route = all_routes.get(key)
-                if route and route.payload_format_version and config.payload_format_version is None:
-                    config.payload_format_version = route.payload_format_version
+            # WebSocket routes don't have methods, use route key directly
+            if config.is_websocket():
+                key = config.route_key
                 all_routes[key] = config
+            else:
+                # Normalize the methods before de-duping to allow an ANY method in implicit API to override a regular HTTP
+                # method on explicit route.
+                for normalized_method in config.methods:
+                    key = config.path + normalized_method
+                    route = all_routes.get(key)
+                    if route and route.payload_format_version and config.payload_format_version is None:
+                        config.payload_format_version = route.payload_format_version
+                    all_routes[key] = config
 
         result = set(all_routes.values())  # Assign to a set() to de-dupe
         LOG.debug(

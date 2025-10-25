@@ -13,6 +13,7 @@ def construct_websocket_event(
     event_type: str = "MESSAGE",
     domain_name: str = "localhost",
     stage: str = "$default",
+    management_api_endpoint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Construct an API Gateway WebSocket event.
@@ -31,6 +32,8 @@ def construct_websocket_event(
         Domain name (default: localhost)
     stage : str
         Stage name (default: $default)
+    management_api_endpoint : str, optional
+        Management API endpoint URL (for local development)
 
     Returns
     -------
@@ -76,6 +79,10 @@ def construct_websocket_event(
         },
         "isBase64Encoded": False,
     }
+
+    # Add Management API endpoint for local development
+    if management_api_endpoint:
+        event["requestContext"]["managementApiEndpoint"] = management_api_endpoint
 
     # Add body for MESSAGE events
     if body is not None and event_type == "MESSAGE":

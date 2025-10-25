@@ -11,6 +11,12 @@
 .idea/dictionaries
 .idea
 .vscode
+CLAUDE.md
+todo.md
+.claude/*
+venv-update-reproducible-linux/
+venv-update-reproducible-mac/
+venv-update-reproducible-win/
 
 # Sensitive or high-churn files:
 .idea/**/dataSources/
