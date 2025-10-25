@@ -10,7 +10,13 @@ from samcli.local.apigw.authorizers.authorizer import Authorizer
 class Route:
     API = "Api"
     HTTP = "HttpApi"
+    WEBSOCKET = "WebSocketApi"
     ANY_HTTP_METHODS = ["GET", "DELETE", "PUT", "POST", "HEAD", "OPTIONS", "PATCH"]
+
+    # WebSocket special route keys
+    WEBSOCKET_CONNECT = "$connect"
+    WEBSOCKET_DISCONNECT = "$disconnect"
+    WEBSOCKET_DEFAULT = "$default"
 
     def __init__(
         self,
@@ -41,7 +47,7 @@ class Route:
         :param Authorizer authorizer_object: the authorizer object this route is using, if any
         :param bool use_default_authorizer: whether or not to use a default authorizer (if defined)
         """
-        self.methods = self.normalize_method(methods)
+        self.methods = self.normalize_method(methods) if methods else []
         self.function_name = function_name
         self.path = path
         self.event_type = event_type
@@ -52,6 +58,10 @@ class Route:
         self.authorizer_name = authorizer_name
         self.authorizer_object = authorizer_object
         self.use_default_authorizer = use_default_authorizer
+
+        # For WebSocket routes, path is the route key
+        if self.is_websocket():
+            self.route_key = path
 
     def __eq__(self, other):
         return (
@@ -84,3 +94,14 @@ class Route:
         if "ANY" in methods:
             return self.ANY_HTTP_METHODS
         return methods
+
+    def is_websocket(self):
+        """
+        Check if this is a WebSocket route.
+
+        Returns
+        -------
+        bool
+            True if this is a WebSocket route, False otherwise
+        """
+        return self.event_type == self.WEBSOCKET
