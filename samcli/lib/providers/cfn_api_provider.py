@@ -34,6 +34,7 @@ LOG = logging.getLogger(__name__)
 class CfnApiProvider(CfnBaseApiProvider):
     METHOD_BINARY_TYPE = "CONVERT_TO_BINARY"
     HTTP_API_PROTOCOL_TYPE = "HTTP"
+    WEBSOCKET_PROTOCOL_TYPE = "WEBSOCKET"
     TYPES = [
         AWS_APIGATEWAY_RESTAPI,
         AWS_APIGATEWAY_STAGE,
@@ -489,27 +490,52 @@ class CfnApiProvider(CfnBaseApiProvider):
             )
             return
 
-        method, path = self._parse_route_key(route_key)
+        # Check if this is a WebSocket API
+        api_resource = self._get_api_resource(resources, api_id)
+        is_websocket = self._is_websocket_api(api_resource)
 
-        if not route_key or not method or not path:
-            LOG.debug("The AWS::ApiGatewayV2::Route '%s' does not have a correct route key '%s'", logical_id, route_key)
-            raise InvalidSamTemplateException(
-                "The AWS::ApiGatewayV2::Route {} does not have a correct route key {}".format(logical_id, route_key)
+        if is_websocket:
+            # WebSocket route - route_key is the actual route key ($connect, $disconnect, etc.)
+            if not route_key:
+                LOG.debug("The AWS::ApiGatewayV2::Route '%s' does not have a route key", logical_id)
+                return
+
+            authorizer_name = None if disable_authorizer else properties.get(CfnApiProvider._ROUTE_AUTHORIZER_ID)
+
+            routes = Route(
+                methods=None,  # WebSocket doesn't use HTTP methods
+                path=route_key,  # For WebSocket, path is the route key
+                function_name=function_name,
+                event_type=Route.WEBSOCKET,
+                payload_format_version=payload_format_version,
+                operation_name=operation_name,
+                stack_path=stack_path,
+                authorizer_name=authorizer_name,
             )
+            collector.add_routes(api_id, [routes])
+        else:
+            # HTTP API route - parse route key for method and path
+            method, path = self._parse_route_key(route_key)
 
-        authorizer_name = None if disable_authorizer else properties.get(CfnApiProvider._ROUTE_AUTHORIZER_ID)
+            if not route_key or not method or not path:
+                LOG.debug("The AWS::ApiGatewayV2::Route '%s' does not have a correct route key '%s'", logical_id, route_key)
+                raise InvalidSamTemplateException(
+                    "The AWS::ApiGatewayV2::Route {} does not have a correct route key {}".format(logical_id, route_key)
+                )
 
-        routes = Route(
-            methods=[method],
-            path=path,
-            function_name=function_name,
-            event_type=Route.HTTP,
-            payload_format_version=payload_format_version,
-            operation_name=operation_name,
-            stack_path=stack_path,
-            authorizer_name=authorizer_name,
-        )
-        collector.add_routes(api_id, [routes])
+            authorizer_name = None if disable_authorizer else properties.get(CfnApiProvider._ROUTE_AUTHORIZER_ID)
+
+            routes = Route(
+                methods=[method],
+                path=path,
+                function_name=function_name,
+                event_type=Route.HTTP,
+                payload_format_version=payload_format_version,
+                operation_name=operation_name,
+                stack_path=stack_path,
+                authorizer_name=authorizer_name,
+            )
+            collector.add_routes(api_id, [routes])
 
     def resolve_resource_path(
         self,
@@ -667,3 +693,54 @@ class CfnApiProvider(CfnBaseApiProvider):
         # https://docs.python.org/3/library/stdtypes.html#str.split
         [method, path] = route_key.split()
         return method, path
+
+    @staticmethod
+    def _get_api_resource(resources: Dict[str, Dict], api_id: str) -> Optional[Dict]:
+        """
+        Get API resource from resources by API ID (logical ID or reference).
+
+        Parameters
+        ----------
+        resources : dict
+            All resources in the template
+        api_id : str
+            API logical ID or reference (e.g., {"Ref": "MyApi"})
+
+        Returns
+        -------
+        dict or None
+            API resource if found, None otherwise
+        """
+        # Handle direct logical ID
+        if isinstance(api_id, str):
+            return resources.get(api_id)
+
+        # Handle CloudFormation intrinsic functions (e.g., {"Ref": "MyApi"})
+        if isinstance(api_id, dict):
+            ref = api_id.get("Ref")
+            if ref:
+                return resources.get(ref)
+
+        return None
+
+    def _is_websocket_api(self, api_resource: Optional[Dict]) -> bool:
+        """
+        Check if an API resource is a WebSocket API.
+
+        Parameters
+        ----------
+        api_resource : dict or None
+            API resource
+
+        Returns
+        -------
+        bool
+            True if WebSocket API, False otherwise
+        """
+        if not api_resource:
+            return False
+
+        properties = api_resource.get("Properties", {})
+        protocol_type = properties.get("ProtocolType", self.HTTP_API_PROTOCOL_TYPE)
+
+        return protocol_type == self.WEBSOCKET_PROTOCOL_TYPE
