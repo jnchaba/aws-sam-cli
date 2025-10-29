@@ -504,7 +504,7 @@ class CfnApiProvider(CfnBaseApiProvider):
 
         # Check if this is a WebSocket API
         api_resource = self._get_api_resource(resources, api_id)
-        is_websocket = self._is_websocket_api(api_resource)I
+        is_websocket = self._is_websocket_api(api_resource)
 
         LOG.info("Route '%s': api_id=%s, route_key=%s, is_websocket=%s", logical_id, api_id, route_key, is_websocket)
 
